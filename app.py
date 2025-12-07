@@ -11,17 +11,7 @@ import colorsys
 import webcolors
 
 app = Flask(__name__)
-
-# --- HEAVY DUTY CORS SETUP ---
-# This forces the server to accept connections from ANY website (Netlify, Localhost, etc.)
-CORS(app, resources={r"/*": {"origins": "*"}})
-
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    return response
+CORS(app) # Basic CORS
 
 # --- CONFIGURATION & DICTIONARIES ---
 CSS3_HEX_TO_NAMES = {
@@ -149,20 +139,17 @@ def consolidate_by_hsv(raw_results):
         for child in sorted_items:
             child_h, child_s, child_v = child['hsv']
             merged = False
-            # Check 1: Greyscale Similarity (Brightness)
             if parent_s < 0.2 and child_s < 0.2:
                 if abs(parent_v - child_v) < 0.2: 
                     parent['area'] += child['area']
                     parent['pct'] += child['pct']
                     merged = True
-            # Check 2: Color Hue Similarity
             elif parent_s >= 0.2 and child_s >= 0.2:
                 hue_diff = min(abs(parent_h - child_h), 1 - abs(parent_h - child_h))
                 if hue_diff < 0.1: 
                     parent['area'] += child['area']
                     parent['pct'] += child['pct']
                     merged = True
-            # Check 3: Noise into Black
             elif parent_v < 0.15 and child_v < 0.3:
                  parent['area'] += child['area']
                  parent['pct'] += child['pct']
@@ -248,27 +235,30 @@ def analyze_image_logic(file_name, file_data, height_cm, width_cm, k_colors, is_
         })
     return output
 
-# --- API ENDPOINT ---
+# --- API ENDPOINT WITH EXPLICIT OPTIONS HANDLING ---
 @app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze():
-    # Helper for the Pre-Flight check (Browsers do this before uploading)
+    # 1. HANDLE THE PRE-FLIGHT HANDSHAKE
     if request.method == 'OPTIONS':
-        return jsonify({}), 200
+        # Browser asks: "Can I POST?" -> We say: "Yes, 200 OK"
+        response = jsonify({'status': 'ok'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+        return response, 200
 
+    # 2. HANDLE THE ACTUAL UPLOAD (POST)
     if 'file' not in request.files: return jsonify({"error": "No file"}), 400
     file = request.files['file']
     filename = file.filename
     file_data = file.read()
     
-    # 1. Parse File Name
     auto_w, auto_h, auto_k = parse_filename_info(filename)
     
-    # 2. Get Manual Overrides
     manual_w = request.form.get('width', type=float)
     manual_h = request.form.get('height', type=float)
     manual_k = request.form.get('k_colors', type=int)
     
-    # 3. Finalize Params
     width = manual_w if manual_w else auto_w
     height = manual_h if manual_h else auto_h
     colors = manual_k if manual_k else (auto_k if auto_k else suggest_color_count(file_data))
@@ -282,7 +272,6 @@ def analyze():
         
     is_dotted = "dot" in filename.lower()
     
-    # 4. Run Analysis
     result = analyze_image_logic(filename, file_data, height, width, colors, is_dotted)
     return jsonify({"status": "success", "data": result})
 
