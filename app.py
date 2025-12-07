@@ -9,9 +9,19 @@ import io
 import re
 import colorsys
 import webcolors
+import gc # Garbage Collector interface
 
 app = Flask(__name__)
-CORS(app) # Basic CORS
+
+# --- HEAVY DUTY CORS SETUP ---
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 # --- CONFIGURATION & DICTIONARIES ---
 CSS3_HEX_TO_NAMES = {
@@ -91,19 +101,27 @@ def parse_filename_info(filename):
         height = float(h_match.group(1)) if h_match else None
     return width, height, k_colors
 
+# --- MEMORY OPTIMIZED PROCESSING ---
 def process_image_for_analysis(image_bytes, is_dotted=False):
-    processing_width = 1200 if is_dotted else 800 
+    # CRITICAL FIX: Limit processing width to 600px to prevent Out-Of-Memory crashes on Free Tier
+    processing_width = 600 
+    
     img = Image.open(io.BytesIO(image_bytes))
     img_array = np.array(img)
     original_h, original_w = img_array.shape[:2]
+    
     scale_factor = processing_width / original_w
     processing_height = int(original_h * scale_factor)
+    
+    # Use standard resize to save memory
     img_small = cv2.resize(img_array, (processing_width, processing_height), interpolation=cv2.INTER_AREA)
+    
     img_processed = img_small
     if not is_dotted:
         if len(img_small.shape) == 3 and img_small.shape[2] == 4:
             rgb_part = img_small[:, :, :3]
             alpha_part = img_small[:, :, 3]
+            # Reduce filtering strength slightly to save RAM
             rgb_smooth = cv2.bilateralFilter(rgb_part, 5, 50, 50) 
             img_processed = np.dstack((rgb_smooth, alpha_part))
         else:
@@ -186,12 +204,22 @@ def smart_merge_by_dominance(raw_results, target_k):
     return final_list
 
 def analyze_image_logic(file_name, file_data, height_cm, width_cm, k_colors, is_dotted):
+    # Free memory before starting
+    gc.collect()
+    
     pixels_lab, pixels_rgb, original_h, original_w, visible_ratio = process_image_for_analysis(file_data, is_dotted)
     if len(pixels_lab) == 0: return {"error": "Empty image"}
 
-    search_k = max(40, k_colors * 8)
-    clf = KMeans(n_clusters=search_k, n_init=10)
-    labels = clf.fit_predict(pixels_lab)
+    # Reduced K slightly for memory safety
+    search_k = max(20, k_colors * 5)
+    
+    try:
+        clf = KMeans(n_clusters=search_k, n_init=10)
+        labels = clf.fit_predict(pixels_lab)
+    except Exception as e:
+        print(f"KMeans Error: {e}")
+        return {"error": "Processing failed - Image too complex for free tier"}
+
     counts = Counter(labels)
     
     center_colors_rgb = []
@@ -219,6 +247,11 @@ def analyze_image_logic(file_name, file_data, height_cm, width_cm, k_colors, is_
 
     final_results = smart_merge_by_dominance(raw_results, target_k=k_colors)
     
+    # Cleanup memory
+    del pixels_lab
+    del pixels_rgb
+    gc.collect()
+    
     output = {
         "filename": file_name,
         "total_ink_area": round(total_ink_area_cm2, 2),
@@ -235,19 +268,16 @@ def analyze_image_logic(file_name, file_data, height_cm, width_cm, k_colors, is_
         })
     return output
 
-# --- API ENDPOINT WITH EXPLICIT OPTIONS HANDLING ---
+# --- API ENDPOINT ---
 @app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze():
-    # 1. HANDLE THE PRE-FLIGHT HANDSHAKE
     if request.method == 'OPTIONS':
-        # Browser asks: "Can I POST?" -> We say: "Yes, 200 OK"
         response = jsonify({'status': 'ok'})
         response.headers.add('Access-Control-Allow-Origin', '*')
         response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
         response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
         return response, 200
 
-    # 2. HANDLE THE ACTUAL UPLOAD (POST)
     if 'file' not in request.files: return jsonify({"error": "No file"}), 400
     file = request.files['file']
     filename = file.filename
