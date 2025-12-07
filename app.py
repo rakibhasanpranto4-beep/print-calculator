@@ -11,7 +11,17 @@ import colorsys
 import webcolors
 
 app = Flask(__name__)
-CORS(app) # Allows your Netlify app to talk to this API
+
+# --- HEAVY DUTY CORS SETUP ---
+# This forces the server to accept connections from ANY website (Netlify, Localhost, etc.)
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 # --- CONFIGURATION & DICTIONARIES ---
 CSS3_HEX_TO_NAMES = {
@@ -222,7 +232,6 @@ def analyze_image_logic(file_name, file_data, height_cm, width_cm, k_colors, is_
 
     final_results = smart_merge_by_dominance(raw_results, target_k=k_colors)
     
-    # Return JSON structure
     output = {
         "filename": file_name,
         "total_ink_area": round(total_ink_area_cm2, 2),
@@ -240,8 +249,12 @@ def analyze_image_logic(file_name, file_data, height_cm, width_cm, k_colors, is_
     return output
 
 # --- API ENDPOINT ---
-@app.route('/analyze', methods=['POST'])
+@app.route('/analyze', methods=['POST', 'OPTIONS'])
 def analyze():
+    # Helper for the Pre-Flight check (Browsers do this before uploading)
+    if request.method == 'OPTIONS':
+        return jsonify({}), 200
+
     if 'file' not in request.files: return jsonify({"error": "No file"}), 400
     file = request.files['file']
     filename = file.filename
